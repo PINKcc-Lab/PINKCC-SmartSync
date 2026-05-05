@@ -6,52 +6,39 @@ import time
 from datetime import datetime
 
 from tqdm import tqdm
+import filecmp
 
 
 def walk_folder(folder, ignore_files=None, ignore_extensions=None, ignore_hidden=True):
-    """
-    Walks through a folder and returns a list of all relatives file paths within it.
-
-    Args:
-        folder (str): Path to the folder.
-        ignore_files (list): List of file paths or folders to ignore.
-        ignore_extensions (list): List of file extensions to ignore.
-        ignore_hidden (bool): If True, ignores hidden files and folders.
-    Returns:
-        list: List of file paths.
-    """
     file_paths = []
     ignore_files = ignore_files or []
     ignore_extensions = ignore_extensions or []
 
+    all_files = []
     for root, dirs, files in os.walk(folder):
         for d in dirs[::-1]:
             rel_dir_path = os.path.relpath(os.path.join(root, d), folder)
-
             if ignore_hidden and d.startswith("."):
                 dirs.remove(d)
                 continue
-
             if any(
                 rel_dir_path == ign or rel_dir_path.startswith(os.path.join(ign, ""))
                 for ign in ignore_files
             ):
                 dirs.remove(d)
                 continue
-
         for file in files:
-            if ignore_hidden and file.startswith("."):
-                continue
+            all_files.append((root, file))
 
-            relative_path = os.path.relpath(os.path.join(root, file), folder)
-
-            if any(relative_path == ign for ign in ignore_files):
-                continue
-
-            if any(relative_path.endswith(ext) for ext in ignore_extensions):
-                continue
-
-            file_paths.append(relative_path)
+    for root, file in tqdm(all_files, desc=f"Walking {folder}", unit="file"):
+        if ignore_hidden and file.startswith("."):
+            continue
+        relative_path = os.path.relpath(os.path.join(root, file), folder)
+        if any(relative_path == ign for ign in ignore_files):
+            continue
+        if any(relative_path.endswith(ext) for ext in ignore_extensions):
+            continue
+        file_paths.append(relative_path)
 
     return file_paths
 
@@ -64,70 +51,45 @@ def sync_folders(
     ignore_extensions=None,
     ignore_hidden=True,
 ):
-    """
-    Syncs files between two folders, ensuring both folders have the same files.
-    If a file exists in one folder but not the other, it is copied over.
-
-    Args:
-        folderA (str): Path to the first folder.
-        folderB (str): Path to the second folder.
-        sync_most_recent (bool): If True, syncs the most recently modified files.
-        ignore_filess (list): Paths to files or folders containing list of files to ignore during sync.
-        ignore_extensions (list): List of file extensions to ignore during sync.
-        ignore_hidden (bool): If True, ignores hidden files and folders during sync.
-    Returns:
-        list: List of synced file paths.
-    """
-
     def loop_folder(rootA, rootB):
-        """
-        Loops through folderA and create folder in rootB if not exists.
-        Args:
-            rootA (str): Source folder path.
-            rootB (str): Target folder path.
-        Returns:
-            None
-        """
+        dirs_to_create = []
         for root, dirs, _ in os.walk(rootA):
             for d in dirs:
                 rel_dir_path = os.path.relpath(os.path.join(root, d), rootA)
                 target_dir_path = os.path.join(rootB, rel_dir_path)
                 if not os.path.exists(target_dir_path):
-                    os.makedirs(target_dir_path, exist_ok=True)
+                    dirs_to_create.append(target_dir_path)
+        for target_dir_path in tqdm(dirs_to_create, desc=f"Creating dirs in {rootB}", unit="dir"):
+            os.makedirs(target_dir_path, exist_ok=True)
 
-    logging.info(f"Copying arborescence structure between {folderA} and {folderB}...")
-    loop_folder(folderA, folderB)
-    loop_folder(folderB, folderA)
-    logging.info("Walking through folders to get file lists...")
-    folderA_files = walk_folder(folderA, ignore_files, ignore_extensions, ignore_hidden)
-    folderB_files = walk_folder(folderB, ignore_files, ignore_extensions, ignore_hidden)
-
-    def get_total_size(files, root):
+    def filter_files(files, rootA, rootB):
         """
-        Calculates the total size of a list of files in bytes.
-        Args:
-            files (list): List of file paths.
-            root (str): Root folder path.
+        Determines which files need to be copied from rootA to rootB,
+        computing the total size in the same pass — no separate size loop.
+
         Returns:
-            int: Total size in bytes.
+            to_copy (list): List of (file, status) tuples for files that need copying.
+            total_size (int): Total byte size of those files.
         """
-        total = 0
-        for f in tqdm(files, desc="Calculating total size", leave=False, unit="files"):
-            total += os.path.getsize(os.path.join(root, f))
-        return total
+        to_copy = []
+        total_size = 0
+        for file in tqdm(files, desc=f"Filtering files in {rootA}", unit="file"):
+            file_path = os.path.join(rootA, file)
+            target_path = os.path.join(rootB, file)
+            if not os.path.exists(target_path):
+                to_copy.append((file, "new"))
+                total_size += os.path.getsize(file_path)
+            elif sync_most_recent and os.path.getmtime(file_path) > os.path.getmtime(target_path):
+                same = filecmp.cmp(file_path, target_path, shallow=False)
+                status = "more recent (same content)" if same else "more recent"
+                to_copy.append((file, status))
+                total_size += os.path.getsize(file_path)
+        return to_copy, total_size
 
-    def loop_files(files, rootA, rootB, total_size=None):
+    def copy_files(to_copy, rootA, rootB, total_size):
         """
-        Loops through files and syncs them from rootA to rootB.
-        Args:
-            files (list): List of file paths to sync.
-            rootA (str): Source folder path.
-            rootB (str): Target folder path.
-            total_size (int): Total size of files to sync in bytes.
-        Returns:
-            list: List of synced file paths. (file, status).
+        Copies only the pre-filtered files, updating the progress bar by bytes.
         """
-        as_been_synced = []
         with tqdm(
             total=total_size,
             desc=f"Syncing to {rootB}",
@@ -135,44 +97,41 @@ def sync_folders(
             unit_scale=True,
             unit_divisor=1024,
         ) as pbar:
-            for file in files:
+            for file, status in tqdm(to_copy, desc=f"Copying files to {rootB}", unit="file"):
                 file_path = os.path.join(rootA, file)
                 target_path = os.path.join(rootB, file)
-
-                if not os.path.exists(target_path):
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                if status == "more recent (same content)":
+                    os.utime(target_path, None)
+                else:
                     shutil.copy2(file_path, target_path)
-                    as_been_synced.append((file, "new"))
-                elif sync_most_recent:
-                    if os.path.getmtime(file_path) > os.path.getmtime(target_path):
-                        shutil.copy2(file_path, target_path)
-                        as_been_synced.append((file, "more recent"))
                 pbar.update(os.path.getsize(file_path))
-        return as_been_synced
+
+    logging.info(f"Copying arborescence structure between {folderA} and {folderB}...")
+    loop_folder(folderA, folderB)
+    loop_folder(folderB, folderA)
+
+    logging.info("Walking through folders to get file lists...")
+    folderA_files = walk_folder(folderA, ignore_files, ignore_extensions, ignore_hidden)
+    folderB_files = walk_folder(folderB, ignore_files, ignore_extensions, ignore_hidden)
 
     logging.info("Starting sync process...")
     start = time.time()
-    synced_A_to_B = loop_files(
-        folderA_files,
-        folderA,
-        folderB,
-        total_size=get_total_size(folderA_files, folderA),
-    )
-    synced_B_to_A = loop_files(
-        folderB_files,
-        folderB,
-        folderA,
-        total_size=get_total_size(folderB_files, folderB),
-    )
+
+    to_copy_A_to_B, size_A_to_B = filter_files(folderA_files, folderA, folderB)
+    to_copy_B_to_A, size_B_to_A = filter_files(folderB_files, folderB, folderA)
+    copy_files(to_copy_A_to_B, folderA, folderB, size_A_to_B)
+    copy_files(to_copy_B_to_A, folderB, folderA, size_B_to_A)
+
+    synced_A_to_B = to_copy_A_to_B
+    synced_B_to_A = to_copy_B_to_A
 
     full_time = time.time() - start
-    logging.info(f"Sync completed in {full_time} :) Saving logs...")
+    logging.info(f"Sync completed in {int(full_time)} seconds. Saving logs...")
 
     log_filename = datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_sync.log"
-    if not os.path.exists(os.path.join(folderA, ".sync_logs")):
-        os.makedirs(os.path.join(folderA, ".sync_logs"))
-    if not os.path.exists(os.path.join(folderB, ".sync_logs")):
-        os.makedirs(os.path.join(folderB, ".sync_logs"))
+    for folder in (folderA, folderB):
+        os.makedirs(os.path.join(folder, ".sync_logs"), exist_ok=True)
 
     with open(os.path.join(folderA, ".sync_logs", log_filename), "w") as log_file:
         log_file.write("Parameters:\n")
@@ -183,26 +142,22 @@ def sync_folders(
         log_file.write(f"  ignore_extensions: {ignore_extensions}\n")
         log_file.write(f"  ignore_hidden: {ignore_hidden}\n\n")
         log_file.write(
-            f"Synced {len(folderA_files) + len(folderB_files)} files ({len(synced_A_to_B) + len(synced_B_to_A)} copied) between {folderA} and {folderB} in {full_time} seconds.\n\n"
+            f"Synced {len(folderA_files) + len(folderB_files)} files "
+            f"({len(synced_A_to_B) + len(synced_B_to_A)} copied) "
+            f"between {folderA} and {folderB} in {int(full_time)} seconds.\n\n"
         )
         for file, status in synced_A_to_B:
-            log_file.write(
-                f"Because of '{status}': {os.path.join(folderA, file)} ==> {os.path.join(folderB, file)}\n"
-            )
+            log_file.write(f"Because of '{status}': {os.path.join(folderA, file)} ==> {os.path.join(folderB, file)}\n")
         for file, status in synced_B_to_A:
-            log_file.write(
-                f"Because of '{status}': {os.path.join(folderB, file)} ==> {os.path.join(folderA, file)}\n"
-            )
-    # with open(os.path.join(folderA, ".sync_logs", log_filename), "r") as log_file:
-    #     logging.info(log_file.read())
+            log_file.write(f"Because of '{status}': {os.path.join(folderB, file)} ==> {os.path.join(folderA, file)}\n")
 
     shutil.copy2(
         os.path.join(folderA, ".sync_logs", log_filename),
         os.path.join(folderB, ".sync_logs", log_filename),
     )
-
     logging.info(
-        f"Logs saved to {os.path.join(folderA, '.sync_logs', log_filename)} and {os.path.join(folderB, '.sync_logs', log_filename)}."
+        f"Logs saved to {os.path.join(folderA, '.sync_logs', log_filename)} "
+        f"and {os.path.join(folderB, '.sync_logs', log_filename)}."
     )
 
 
