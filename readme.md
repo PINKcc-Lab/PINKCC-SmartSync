@@ -1,4 +1,4 @@
-# FolderSync CLI
+# SmartSync CLI
 
 A lightweight Python utility to synchronize files between two directories. It ensures both folders contain the same data by performing a bidirectional sync, with support for ignoring specific files, extensions, and hidden directories.
 
