@@ -129,7 +129,7 @@ def sync_folders(
     full_time = time.time() - start
     logging.info(f"Sync completed in {int(full_time)} seconds. Saving logs...")
 
-    log_filename = datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_sync.log"
+    log_filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_sync.log"
     for folder in (folderA, folderB):
         os.makedirs(os.path.join(folder, ".sync_logs"), exist_ok=True)
 
