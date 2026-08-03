@@ -43,6 +43,17 @@ def walk_folder(folder, ignore_files=None, ignore_extensions=None, ignore_hidden
     return file_paths
 
 
+def common_root_entries(folderA, folderB, ignore_hidden=True):
+    """Returns the set of top-level entry names (files/dirs) present in both folders."""
+    def entries(folder):
+        names = os.listdir(folder)
+        if ignore_hidden:
+            names = [n for n in names if not n.startswith(".")]
+        return set(names)
+
+    return entries(folderA) & entries(folderB)
+
+
 def sync_folders(
     folderA,
     folderB,
@@ -50,12 +61,25 @@ def sync_folders(
     ignore_files=None,
     ignore_extensions=None,
     ignore_hidden=True,
+    same_root=False,
 ):
+    same_root_entries = (
+        common_root_entries(folderA, folderB, ignore_hidden) if same_root else None
+    )
+
+    def in_same_root(relative_path):
+        if same_root_entries is None:
+            return True
+        top_level = relative_path.split(os.sep)[0]
+        return top_level in same_root_entries
+
     def loop_folder(rootA, rootB):
         dirs_to_create = []
         for root, dirs, _ in os.walk(rootA):
             for d in dirs:
                 rel_dir_path = os.path.relpath(os.path.join(root, d), rootA)
+                if not in_same_root(rel_dir_path):
+                    continue
                 target_dir_path = os.path.join(rootB, rel_dir_path)
                 if not os.path.exists(target_dir_path):
                     dirs_to_create.append(target_dir_path)
@@ -114,6 +138,9 @@ def sync_folders(
     logging.info("Walking through folders to get file lists...")
     folderA_files = walk_folder(folderA, ignore_files, ignore_extensions, ignore_hidden)
     folderB_files = walk_folder(folderB, ignore_files, ignore_extensions, ignore_hidden)
+    if same_root:
+        folderA_files = [f for f in folderA_files if in_same_root(f)]
+        folderB_files = [f for f in folderB_files if in_same_root(f)]
 
     logging.info("Starting sync process...")
     start = time.time()
@@ -140,7 +167,8 @@ def sync_folders(
         log_file.write(f"  sync_most_recent: {sync_most_recent}\n")
         log_file.write(f"  ignore_files: {ignore_files}\n")
         log_file.write(f"  ignore_extensions: {ignore_extensions}\n")
-        log_file.write(f"  ignore_hidden: {ignore_hidden}\n\n")
+        log_file.write(f"  ignore_hidden: {ignore_hidden}\n")
+        log_file.write(f"  same_root: {same_root}\n\n")
         log_file.write(
             f"Synced {len(folderA_files) + len(folderB_files)} files "
             f"({len(synced_A_to_B) + len(synced_B_to_A)} copied) "
@@ -197,6 +225,12 @@ if __name__ == "__main__":
         default=True,
         help="Ignore hidden files and folders during sync.",
     )
+    parser.add_argument(
+        "--same-root",
+        action="store_true",
+        default=False,
+        help="Only sync subfolders and files whose top-level name already exists in both root folders.",
+    )
 
     args = parser.parse_args()
     if os.path.exists(args.A) is False:
@@ -212,12 +246,14 @@ if __name__ == "__main__":
     )
     ignore_extensions = args.ignore_extensions
     ignore_hidden = args.ignore_hidden
+    same_root = args.same_root
 
     logging.info(f"Starting sync between {args.A} and {args.B} with parameters:\n")
     logging.info(f"  sync_most_recent: {sync_most_recent}")
     logging.info(f"  ignore_files: {ignore_files}")
     logging.info(f"  ignore_extensions: {ignore_extensions}")
     logging.info(f"  ignore_hidden: {ignore_hidden}")
+    logging.info(f"  same_root: {same_root}")
 
     sync_folders(
         args.A,
@@ -226,4 +262,5 @@ if __name__ == "__main__":
         ignore_files=ignore_files,
         ignore_extensions=ignore_extensions,
         ignore_hidden=ignore_hidden,
+        same_root=same_root,
     )
